@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Lytze the Fuzbal Prototype</title>
+</head>
+<body>
+<canvas id="sim"></canvas>
+<script>
+var canvas = document.getElementById('sim');
+var ctx = canvas.getContext('2d');
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Black hole constructor
+function BlackHole(x, y, mass) {
+  this.x = x;
+  this.y = y;
+  this.vx = 0;
+  this.vy = 0;
+  this.mass = mass || 4.5e4;
+  this.G = 28.0;
+  this.omega = 0.5;
+  this.horizon = 42;
+  this.softening = 120;
+  this.swirlStrength = 180.0;
+  this.accCap = 2500;
+  this.energyBurst = 0; // for merger flash
+}
+
+var blackHoles = [ new BlackHole(canvas.width/2, canvas.height/2) ];
+
+var BALL_COUNT = 12;
+var balls = [];
+var stats = { absorbed: 0, mergers: 0 };
+
+function randRange(a, b) { return a + Math.random() * (b - a); }
+function polarToXY(cx, cy, r, ang) { return { x: cx + r * Math.cos(ang), y: cy + r * Math.sin(ang) }; }
+
+function initBalls() {
+  balls.length = 0;
+  var cx = canvas.width/2, cy = canvas.height/2;
+  for (var i = 0; i < BALL_COUNT; i++) {
+    var r = randRange(140, Math.min(canvas.width, canvas.height) * 0.35);
+    var ang = randRange(0, Math.PI * 2);
+    var pos = polarToXY(cx, cy, r, ang);
+
+    var vCirc = Math.sqrt((blackHoles[0].G * blackHoles[0].mass) / (r + blackHoles[0].softening));
+    var tx = -Math.sin(ang);
+    var ty =  Math.cos(ang);
+
+    var jitter = 0.25 * vCirc;
+    var vx = tx * vCirc + randRange(-jitter, jitter);
+    var vy = ty * vCirc + randRange(-jitter, jitter);
+
+    balls.push({
+      x: pos.x, y: pos.y, vx: vx, vy: vy,
+      color: pickColor(i),
+      radius: 6 + (i % 3),
+      life: 0
+    });
+  }
+}
+
+function pickColor(i) {
+  var palette = [
+    '#58D68D', '#5DADE2', '#F5B041', '#AF7AC5',
+    '#E74C3C', '#1ABC9C', '#F4D03F', '#3498DB',
+    '#F39C12', '#9B59B6', '#2ECC71', '#EC7063'
+  ];
+  return palette[i % palette.length];
+}
+
+var last = performance.now();
+function step(now) {
+  var dt = Math.min(0.035, (now - last) / 1000);
+  last = now;
+
+  fadeTrail(0.12);
+
+  // Black hole mutual gravity
+  for (var i = 0; i < blackHoles.length; i++) {
+    var BH1 = blackHoles[i];
+    var ax = 0, ay = 0;
+    for (var j = 0; j < blackHoles.length; j++) {
+      if (i === j) continue;
+      var BH2 = blackHoles[j];
+      var rx = BH2.x - BH1.x;
+      var ry = BH2.y - BH1.y;
+      var r2 = rx*rx + ry*ry;
+      var r = Math.sqrt(r2);
+      if (r < BH1.horizon + BH2.horizon) {
+        // Merge
+        mergeBlackHoles(i, j);
+        return requestAnimationFrame(step);
+      }
+      var ux = rx / (r+1e-6);
+      var uy = ry / (r+1e-6);
+      var grav = (BH1.G * BH2.mass) / (r2 + BH1.softening*BH1.softening);
+      ax += ux * grav;
+      ay += uy * grav;
+    }
+    BH1.vx += ax * dt;
+    BH1.vy += ay * dt;
+  }
+
+  // Update BH positions
+  for (var i = 0; i < blackHoles.length; i++) {
+    var BH = blackHoles[i];
+    BH.x += BH.vx * dt;
+    BH.y += BH.vy * dt;
+    drawBlackHole(BH);
+  }
+
+  // Balls
+  for (var j = 0; j < balls.length; j++) {
+    var b = balls[j];
+    var ax = 0, ay = 0;
+    for (var k = 0; k < blackHoles.length; k++) {
+      var BH = blackHoles[k];
+      var rx = BH.x - b.x;
+      var ry = BH.y - b.y;
+      var r2 = rx*rx + ry*ry;
+      var r = Math.sqrt(r2);
+      var ux = r > 1e-6 ? rx/r : 0;
+      var uy = r > 1e-6 ? ry/r : 0;
+      var px = -uy, py = ux;
+      var gravMag = (BH.G * BH.mass) / (r2 + BH.softening*BH.softening);
+      ax += ux * gravMag;
+      ay += uy * gravMag;
+      var swirlMag = BH.swirlStrength * BH.omega / (r+1);
+      ax += px * swirlMag;
+      ay += py * swirlMag;
+      if (r < BH.horizon) {
+        stats.absorbed++;
+        respawn(b);
+      }
+    }
+    var damping = 0.02;
+    ax -= b.vx * damping;
+    ay -= b.vy * damping;
+    var a2 = ax*ax + ay*ay;
+    if (a2 > blackHoles[0].accCap*blackHoles[0].accCap) {
+      var a = Math.sqrt(a2);
+      var scale = blackHoles[0].accCap / a;
+      ax *= scale; ay *= scale;
+    }
+    b.vx += ax*dt;
+    b.vy += ay*dt;
+    b.x += b.vx*dt;
+    b.y += b.vy*dt;
+    b.life += dt;
+    drawBall(b);
+  }
+
+  drawHUD();
+  requestAnimationFrame(step);
+}
+
+function mergeBlackHoles(i, j) {
+  var BH1 = blackHoles[i];
+  var BH2 = blackHoles[j];
+  var totalMass = BH1.mass + BH2.mass;
+  var newX = (BH1.x*BH1.mass + BH2.x*BH2.mass)/totalMass;
+  var newY = (BH1.y*BH1.mass + BH2.y*BH2.mass)/totalMass;
+  var newVX = (BH1.vx*BH1.mass + BH2.vx*BH2.mass)/totalMass;
+  var newVY = (BH1.vy*BH1.mass + BH2.vy*BH2.mass)/totalMass;
+  var newBH = new BlackHole(newX, newY, totalMass);
+  newBH.vx = newVX;
+  newBH.vy = newVY;
+  newBH.horizon = Math.sqrt(BH1.horizon*BH1.horizon + BH2.horizon*BH2.horizon);
+  newBH.energyBurst = 1.0;
+  blackHoles.splice(Math.max(i,j),1);
+  blackHoles.splice(Math.min(i,j),1);
+  blackHoles.push(newBH);
+  stats.mergers++;
+}
+
+function respawn(b) {
+  var cx = canvas.width/2, cy = canvas.height/2;
+  var base = Math.min(canvas.width, canvas.height) * 0.4;
+  var r = randRange(base*0.55, base*0.95);
+  var ang = randRange(0, Math.PI*2);
+  var pos = polarToXY(cx, cy, r, ang);
+  var vCirc = Math.sqrt((blackHoles[0].G * blackHoles[0].mass) / (r + blackHoles[0].softening));
+  var tx = -Math.sin(ang), ty = Math.cos(ang);
+  b.x = pos.x; b.y = pos.y;
+  b.vx = tx*vCirc; b.vy = ty*vCirc;
+  b.life = 0;
+}
+
+function fadeTrail(alpha) {
+  ctx.fillStyle = 'rgba(0,0,8,'+alpha+')';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawBlackHole(BH) {
+  var cx = BH.x, cy = BH.y;
+
+  // Energy burst effect on merger
+  if (BH.energyBurst > 0) {
+    var burstRadius = BH.horizon * (4 + 20 * BH.energyBurst);
+    var burstGrad = ctx.createRadialGradient(cx, cy, BH.horizon, cx, cy, burstRadius);
+    burstGrad.addColorStop(0, 'rgba(255,255,200,'+BH.energyBurst+')');
+    burstGrad.addColorStop(1, 'rgba(255,255,200,0)');
+    ctx.fillStyle = burstGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, burstRadius, 0, Math.PI*2);
+    ctx.fill();
+    BH.energyBurst *= 0.92; // fade burst
+  }
+
+  // Accretion glow
+  var glow = ctx.createRadialGradient(cx, cy, BH.horizon*0.7, cx, cy, BH.horizon*4.0);
+  glow.addColorStop(0, 'rgba(255,200,100,0.18)');
+  glow.addColorStop(0.35, 'rgba(255,140,60,0.12)');
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(cx, cy, BH.horizon*4.0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Event horizon
+  var horizonGrad = ctx.createRadialGradient(cx, cy, BH.horizon*0.2, cx, cy, BH.horizon);
+  horizonGrad.addColorStop(0, 'rgba(0,0,0,1)');
+  horizonGrad.addColorStop(1, 'rgba(10,10,20,1)');
+  ctx.fillStyle = horizonGrad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, BH.horizon, 0, Math.PI*2);
+  ctx.fill();
+}
+
+function drawBall(b) {
+  ctx.save();
+  var speed = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+  var glowAlpha = Math.min(0.4, 0.1 + speed*0.003);
+  var trailLen = Math.min(30, 6 + speed*0.25);
+  var dx = b.vx, dy = b.vy;
+  var vmag = Math.sqrt(dx*dx + dy*dy) || 1;
+  var tx = dx/vmag, ty = dy/vmag;
+
+  ctx.strokeStyle = hexWithAlpha(b.color, glowAlpha);
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(b.x, b.y);
+  ctx.lineTo(b.x - tx*trailLen, b.y - ty*trailLen);
+  ctx.stroke();
+
+  ctx.fillStyle = b.color;
+  ctx.beginPath();
+  ctx.arc(b.x, b.y, b.radius, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function hexWithAlpha(hex, alpha) {
+  var r = parseInt(hex.substring(1,3),16);
+  var g = parseInt(hex.substring(3,5),16);
+  var b = parseInt(hex.substring(5,7),16);
+  return 'rgba('+r+','+g+','+b+','+alpha+')';
+}
+
+function drawHUD() {
+  ctx.save();
+  ctx.font = '14px monospace';
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  var lines = [
+    'Black holes: ' + blackHoles.length,
+    'Balls: ' + BALL_COUNT,
+    'Absorbed: ' + stats.absorbed,
+    'Mergers: ' + stats.mergers
+  ];
+  var y = 24;
+  for (var i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], 18, y);
+    y += 18;
+  }
+  ctx.restore();
+}
+
+// Add new black hole on click/tap
+canvas.addEventListener('click', function(e) {
+  var rect = canvas.getBoundingClientRect();
+  var x = e.clientX - rect.left;
+  var y = e.clientY - rect.top;
+  blackHoles.push(new BlackHole(x, y));
+});
+
+// Initialize and run
+initBalls();
+ctx.fillStyle = 'rgb(0,0,8)';
+ctx.fillRect(0, 0, canvas.width, canvas.height);
+requestAnimationFrame(step);
+</script>
+</body>
+</html>
