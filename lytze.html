@@ -23,7 +23,7 @@ resize();
 
 // --- Game State and Constants ---
 const PLAYER_BALL_INDEX = 0; // Lytze will be the first ball
-const LYTZE_IMAGE_URL = 'lytze.png'; // REPLACE THIS WITH A REAL URL
+const LYTZE_IMAGE_URL = 'lytze.png'; 
 const BALL_COUNT = 10;
 const COIN_RADIUS = 12;
 
@@ -123,8 +123,15 @@ function initBalls() {
     balls.push({
       x: pos.x, y: pos.y, vx: vx, vy: vy,
       color: pickColor(i),
-      radius: (i === PLAYER_BALL_INDEX) ? 18 : 6 + (i % 3), // Lytze is bigger
-      life: 0,
+      
+      /* THIS is how to make lytze bigger. 
+                                           |
+                                           |
+                                           V      */
+      radius: (i === PLAYER_BALL_INDEX) ? 30 : 6 + (i % 3), 
+      
+      
+      life: 0,
       isLytze: (i === PLAYER_BALL_INDEX)
     });
   }
