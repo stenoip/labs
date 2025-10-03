@@ -1,554 +1,667 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Lytze the Fuzbal Prototype</title>
-  <style>
-    body { margin: 0; overflow: hidden; background-color: #000008; }
-    canvas { display: block; }
-  </style>
+    <meta charset="utf-8" />
+    <title>Lytze the Fuzbal Prototype</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000008; }
+        canvas { display: block; }
+    </style>
 </head>
 <body>
-<canvas id="sim"></canvas>
-<script>
-var canvas = document.getElementById('sim');
-var ctx = canvas.getContext('2d');
+    <canvas id="sim"></canvas>
+    <script>
+        var canvas = document.getElementById('sim');
+        var ctx = canvas.getContext('2d');
+        var audioCtx; // Web Audio API context
 
-function resize() {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-}
-window.addEventListener('resize', resize);
-resize();
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
 
-// --- Game State and Constants ---
-const PLAYER_BALL_INDEX = 0; // Lytze will be the first ball
-const LYTZE_IMAGE_URL = 'https://stenoip.github.io/labs/lytze.png'; 
-const BALL_COUNT = 10;
-const COIN_RADIUS = 12;
+        // --- Game State and Constants ---
+        const PLAYER_BALL_INDEX = 0; // Lytze will be the first ball
+        const LYTZE_IMAGE_URL = 'https://stenoip.github.io/labs/lytze.png';
+        const BALL_COUNT = 10;
+        const COIN_RADIUS = 12;
+        
+        // *** NEW: Audio element for the Game Over sound ***
+        const GAME_OVER_AUDIO_URL = 'https://stenoip.github.io/labs/2b259c17-80f8-4d4d-9d57-41856d3a69ae.mp3';
+        const gameOverAudio = new Audio(GAME_OVER_AUDIO_URL);
 
-var lytzeImage = new Image();
-lytzeImage.src = LYTZE_IMAGE_URL;
+        var lytzeImage = new Image();
+        lytzeImage.src = LYTZE_IMAGE_URL;
 
-var stats = { absorbed: 0, mergers: 0, level: 1, wins: 0 };
-var coin = { x: 0, y: 0, active: false };
+        var stats = { absorbed: 0, mergers: 0, level: 1, wins: 0 };
+        var coin = { x: 0, y: 0, active: false };
 
-// Wall constructor
-function Wall(x, y, w, h, color) {
-    this.x = x;
-    this.y = y;
-    this.width = w;
-    this.height = h;
-    this.color = color || '#33A033'; // Default wall color
-}
+        // Wall constructor
+        function Wall(x, y, w, h, color) {
+            this.x = x;
+            this.y = y;
+            this.width = w;
+            this.height = h;
+            this.color = color || '#33A033'; // Default wall color
+        }
 
-// Black hole constructor (kept as is)
-function BlackHole(x, y, mass) {
-  this.x = x;
-  this.y = y;
-  this.vx = 0;
-  this.vy = 0;
-  this.mass = mass || 4.5e4;
-  this.G = 28.0;
-  this.omega = 0.5;
-  this.horizon = 42;
-  this.softening = 120;
-  this.swirlStrength = 180.0;
-  this.accCap = 2500;
-  this.energyBurst = 0; // for merger flash
-}
+        // Black hole constructor (kept as is)
+        function BlackHole(x, y, mass) {
+            this.x = x;
+            this.y = y;
+            this.vx = 0;
+            this.vy = 0;
+            this.mass = mass || 4.5e4;
+            this.G = 28.0;
+            this.omega = 0.5;
+            this.horizon = 42;
+            this.softening = 120;
+            this.swirlStrength = 180.0;
+            this.accCap = 2500;
+            this.energyBurst = 0; // for merger flash
+        }
 
-var blackHoles = [ new BlackHole(canvas.width/2, canvas.height/2) ];
-var balls = [];
-var walls = []; // New array for walls
+        var blackHoles = [ new BlackHole(canvas.width/2, canvas.height/2) ];
+        var balls = [];
+        var walls = []; // New array for walls
 
-function randRange(a, b) { return a + Math.random() * (b - a); }
-function polarToXY(cx, cy, r, ang) { return { x: cx + r * Math.cos(ang), y: cy + r * Math.sin(ang) }; }
+        function randRange(a, b) { return a + Math.random() * (b - a); }
+        function polarToXY(cx, cy, r, ang) { return { x: cx + r * Math.cos(ang), y: cy + r * Math.sin(ang) }; }
 
-/* --- Level Management ---   */
-function setupLevel(level) {
-  stats.level = level;
-  stats.absorbed = 0; // Reset stats for the level
-  stats.mergers = 0;
-  blackHoles.length = 0;
-  balls.length = 0;
-  walls.length = 0; // Reset walls
-  coin.active = false;
-  
-  var cx = canvas.width/2, cy = canvas.height/2;
+        // ----------------------------------------------------
+        // --- SOUND EFFECT FUNCTIONS ---
+        // ----------------------------------------------------
 
-  // Level-specific setup
-  if (level === 1) {
-    // Single BH in the center
-    blackHoles.push(new BlackHole(cx, cy, 4.5e4));
-    // Place coin far from the center
-    var coinR = Math.min(canvas.width, canvas.height) * 0.45;
-    var coinAng = randRange(0, Math.PI * 2);
-    var coinPos = polarToXY(cx, cy, coinR, coinAng);
-    coin.x = coinPos.x;
-    coin.y = coinPos.y;
-    coin.active = true;
-  } else if (level === 2) {
-    // Two black holes, smaller
-    var offset = 150;
-    blackHoles.push(new BlackHole(cx - offset, cy, 3e4));
-    blackHoles.push(new BlackHole(cx + offset, cy, 3e4));
-    
-    // --- ADD WALLS FOR LEVEL 2 ---
-    // Wall 1: Horizontal barrier (a "wall")
-    walls.push(new Wall(cx - 200, cy - 50, 400, 20, '#5D6D7E'));
-    // Wall 2: Small square (a 2D wall)
-    walls.push(new Wall(cx, cy + 150, 50, 50, '#E74C3C'));
-    // -----------------------------
-    
-    // Place coin near the edge
-    var coinR = Math.min(canvas.width, canvas.height) * 0.4;
-    var coinAng = randRange(0, Math.PI * 2);
-    var coinPos = polarToXY(cx, cy, coinR, coinAng);
-    coin.x = coinPos.x;
-    coin.y = coinPos.y;
-    coin.active = true;
-  } else if (level === 3) {
-    // Level 3: Three smaller black holes in a triangle formation
-    var triangleOffset = 180;
-    var bhMass = 2.5e4; // Slightly smaller mass
-    
-    blackHoles.push(new BlackHole(cx, cy - triangleOffset, bhMass));
-    blackHoles.push(new BlackHole(cx - triangleOffset * 0.866, cy + triangleOffset * 0.5, bhMass)); // Math.sqrt(3)/2 ~ 0.866
-    blackHoles.push(new BlackHole(cx + triangleOffset * 0.866, cy + triangleOffset * 0.5, bhMass));
-    
-    // Walls: Create a small central box for balls to get trapped
-    var boxSize = 100;
-    walls.push(new Wall(cx - boxSize/2, cy - boxSize/2, boxSize, 10, '#2ECC71')); // Top
-    walls.push(new Wall(cx - boxSize/2, cy + boxSize/2, boxSize, 10, '#2ECC71')); // Bottom
-    walls.push(new Wall(cx - boxSize/2, cy - boxSize/2, 10, boxSize, '#2ECC71')); // Left
-    walls.push(new Wall(cx + boxSize/2, cy - boxSize/2, 10, boxSize + 10, '#2ECC71')); // Right
-    
-    // Coin: Place the coin near one of the BHs, making the path risky
-    coin.x = blackHoles[0].x;
-    coin.y = blackHoles[0].y + 50;
-    coin.active = true;
-  } else if (level === 4) {
-    // Level 4: One large central BH with a wall gauntlet
-    var centralMass = 5.5e4; // Larger central mass
-    blackHoles.push(new BlackHole(cx, cy, centralMass));
-    
-    // Walls: Two long, horizontal barriers to create a narrow, winding path
-    var wallLength = 500;
-    var wallGap = 80;
-    // Top Wall
-    walls.push(new Wall(cx - wallLength/2, cy - wallGap/2 - 7.5, wallLength, 15, '#F39C12'));
-    // Bottom Wall
-    walls.push(new Wall(cx - wallLength/2, cy + wallGap/2 - 7.5, wallLength, 15, '#F39C12'));
-    
-    // Coin: Place the coin at the end of the central wall corridor
-    coin.x = cx + wallLength/2 + 50;
-    coin.y = cy;
-    coin.active = true;
-  } else {
-    // Default / Victory screen
-    alert('You beat all levels! The game is over.');
-    blackHoles.push(new BlackHole(cx, cy));
-    stats.level = 'Finished';
-    coin.active = false;
-  }
+        function initAudio() {
+            // Check if audio context is supported and not already initialized
+            if (window.AudioContext || window.webkitAudioContext) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            } else {
+                console.warn('Web Audio API not supported in this browser.');
+            }
+        }
 
-  initBalls();
-}
+        // Utility to generate a basic sine wave sound
+        function playSound(freq, duration, type, volume = 0.5, fadeOut = 0.05) {
+            if (!audioCtx) return;
 
-function initBalls() {
-  balls.length = 0;
-  var cx = canvas.width/2, cy = canvas.height/2;
-  var bh = blackHoles[0] || { G: 28.0, mass: 4.5e4, softening: 120 }; // Use first BH or defaults
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
 
-  for (var i = 0; i < BALL_COUNT; i++) {
-    var r = randRange(140, Math.min(canvas.width, canvas.height) * 0.35);
-    var ang = randRange(0, Math.PI * 2);
-    var pos = polarToXY(cx, cy, r, ang);
+            oscillator.type = type;
+            oscillator.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(volume, audioCtx.currentTime);
 
-    var vCirc = Math.sqrt((bh.G * bh.mass) / (r + bh.softening));
-    var tx = -Math.sin(ang);
-    var ty =  Math.cos(ang);
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
 
-    var jitter = (i === PLAYER_BALL_INDEX) ? 0.0 : 0.25 * vCirc; // Lytze starts with less jitter
-    var vx = tx * vCirc + randRange(-jitter, jitter);
-    var vy = ty * vCirc + randRange(-jitter, jitter);
+            oscillator.start();
 
-    balls.push({
-      x: pos.x, y: pos.y, vx: vx, vy: vy,
-      color: pickColor(i),
-      radius: (i === PLAYER_BALL_INDEX) ? 30 : 6 + (i % 3), 
-      life: 0,
-      isLytze: (i === PLAYER_BALL_INDEX)
-    });
-  }
-}
+            // Fade out the sound
+            gainNode.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + duration);
+            oscillator.stop(audioCtx.currentTime + duration);
+        }
 
-function pickColor(i) {
-  var palette = [
-    '#F0F0F0', // Lytze's color
-    '#5DADE2', '#F5B041', '#AF7AC5',
-    '#E74C3C', '#1ABC9C', '#F4D03F', '#3498DB',
-    '#F39C12', '#9B59B6', '#2ECC71', '#EC7063'
-  ];
-  return palette[i % palette.length];
-}
+        function playWallHit() {
+            // A quick, clicky percussive sound
+            if (!audioCtx) return;
+            const now = audioCtx.currentTime;
+            const o = audioCtx.createOscillator();
+            const g = audioCtx.createGain();
+            o.connect(g);
+            g.connect(audioCtx.destination);
+            o.type = 'square';
+            o.frequency.setValueAtTime(440, now);
+            g.gain.setValueAtTime(0.2, now);
+            g.gain.exponentialRampToValueAtTime(0.00001, now + 0.05);
+            o.start(now);
+            o.stop(now + 0.05);
+        }
 
-var last = performance.now();
-function step(now) {
-  var dt = Math.min(0.035, (now - last) / 1000);
-  last = now;
+        function playCoinCollect() {
+            // A triumphant chime (arpeggio)
+            if (!audioCtx) return;
+            const now = audioCtx.currentTime;
+            const notes = [523.25, 659.25, 783.99, 1046.5]; // C5, E5, G5, C6
 
-  fadeTrail(0.12);
+            notes.forEach((freq, index) => {
+                const o = audioCtx.createOscillator();
+                const g = audioCtx.createGain();
+                o.connect(g);
+                g.connect(audioCtx.destination);
 
-  // Black hole mutual gravity (BH loop kept as is)
-  for (var i = 0; i < blackHoles.length; i++) {
-    var BH1 = blackHoles[i];
-    var ax = 0, ay = 0;
-    for (var j = 0; j < blackHoles.length; j++) {
-      if (i === j) continue;
-      var BH2 = blackHoles[j];
-      var rx = BH2.x - BH1.x;
-      var ry = BH2.y - BH1.y;
-      var r2 = rx*rx + ry*ry;
-      var r = Math.sqrt(r2);
-      if (r < BH1.horizon + BH2.horizon) {
-        // Merge
-        mergeBlackHoles(i, j);
-        return requestAnimationFrame(step);
-      }
-      var ux = rx / (r+1e-6);
-      var uy = ry / (r+1e-6);
-      var grav = (BH1.G * BH2.mass) / (r2 + BH1.softening*BH1.softening);
-      ax += ux * grav;
-      ay += uy * grav;
-    }
-    BH1.vx += ax * dt;
-    BH1.vy += ay * dt;
-  }
+                o.type = 'triangle';
+                o.frequency.setValueAtTime(freq, now + index * 0.05);
+                g.gain.setValueAtTime(0.3, now + index * 0.05);
+                g.gain.exponentialRampToValueAtTime(0.00001, now + index * 0.05 + 0.2);
 
-  // Update BH positions
-  for (var i = 0; i < blackHoles.length; i++) {
-    var BH = blackHoles[i];
-    BH.x += BH.vx * dt;
-    BH.y += BH.vy * dt;
-    drawBlackHole(BH);
-  }
+                o.start(now + index * 0.05);
+                o.stop(now + index * 0.05 + 0.2);
+            });
+        }
 
-  // Draw walls before coin and balls
-  for (var i = 0; i < walls.length; i++) {
-    drawWall(walls[i]);
-  }
+        function playBlackHoleMerge() {
+            // A deep, resonant boom
+            playSound(30, 0.6, 'sine', 0.8);
+            playSound(50, 0.8, 'sine', 0.6); // Add a second, slightly higher frequency
+        }
 
-  // Draw coin *before* balls so Lytze can cover it
-  if (coin.active) {
-    drawCoin(coin);
-    checkWinCondition(balls[PLAYER_BALL_INDEX]);
-  }
-    // Balls (Lytze included)
-  for (var j = 0; j < balls.length; j++) {
-    var b = balls[j];
-    var ax = 0, ay = 0;
-    
-    // Gravity application
-    for (var k = 0; k < blackHoles.length; k++) {
-      var BH = blackHoles[k];
-      var rx = BH.x - b.x;
-      var ry = BH.y - b.y;
-      var r2 = rx*rx + ry*ry;
-      var r = Math.sqrt(r2);
-      var ux = r > 1e-6 ? rx/r : 0;
-      var uy = r > 1e-6 ? ry/r : 0;
-      var px = -uy, py = ux;
-      var gravMag = (BH.G * BH.mass) / (r2 + BH.softening*BH.softening);
-      ax += ux * gravMag;
-      ay += uy * gravMag;
-      var swirlMag = BH.swirlStrength * BH.omega / (r+1);
-      ax += px * swirlMag;
-      ay += py * swirlMag;
-      if (r < BH.horizon) {
-        // Collision with black hole
-        if (b.isLytze) {
-          // Lytze loses! Restart level.
-          alert('Lytze was absorbed! Restarting Level ' + stats.level);
-          setupLevel(stats.level);
-          return requestAnimationFrame(step);
-        } else {
-          stats.absorbed++;
-          respawn(b);
-        }
-      }
-    }
-    
-    var damping = 0.02;
-    ax -= b.vx * damping;
-    ay -= b.vy * damping;
-    var a2 = ax*ax + ay*ay;
-    if (a2 > blackHoles[0].accCap*blackHoles[0].accCap) {
-      var a = Math.sqrt(a2);
-      var scale = blackHoles[0].accCap / a;
-      ax *= scale; ay *= scale;
-    }
-    b.vx += ax*dt;
-    b.vy += ay*dt;
-    b.x += b.vx*dt;
-    b.y += b.vy*dt;
-    
-    // --- WALL COLLISION DETECTION AND RESPONSE ---
-    for (var k = 0; k < walls.length; k++) {
-      handleWallCollision(b, walls[k]);
-    }
-    // ---------------------------------------------
+        // *** UPDATED: Function to play the external MP3 for Lytze absorbed ***
+        function playLytzeAbsorbed() {
+            // Use the HTML5 Audio object for the external MP3 URL
+            if (gameOverAudio) {
+                gameOverAudio.currentTime = 0; // Rewind to the start
+                gameOverAudio.play().catch(e => console.error("Error playing custom audio:", e));
+            }
+        }
 
-    b.life += dt;
-    drawBall(b);
-  }
+        function playBallAbsorbed() {
+            // A quick, subtle "pop"
+            playSound(600, 0.08, 'square', 0.1);
+        }
 
-  drawHUD();
-  requestAnimationFrame(step);
-}
+        // ----------------------------------------------------
 
-function checkWinCondition(lytze) {
-  if (!lytze || !coin.active) return;
+        /* --- Level Management ---
+        */
+        function setupLevel(level) {
+            stats.level = level;
+            stats.absorbed = 0; // Reset stats for the level
+            stats.mergers = 0;
+            blackHoles.length = 0;
+            balls.length = 0;
+            walls.length = 0; // Reset walls
+            coin.active = false;
 
-  var dx = lytze.x - coin.x;
-  var dy = lytze.y - coin.y;
-  var distance = Math.sqrt(dx*dx + dy*dy);
+            var cx = canvas.width/2, cy = canvas.height/2;
 
-  if (distance < lytze.radius + COIN_RADIUS) {
-    // Lytze collected the coin! Win condition met.
-    stats.wins++;
-    coin.active = false;
-    alert('Level ' + stats.level + ' cleared! Time for Level ' + (stats.level + 1) + '!');
-    setupLevel(stats.level + 1);
-  }
-}
+            // Level-specific setup
+            if (level === 1) {
+                // Single BH in the center
+                blackHoles.push(new BlackHole(cx, cy, 4.5e4));
+                // Place coin far from the center
+                var coinR = Math.min(canvas.width, canvas.height) * 0.45;
+                var coinAng = randRange(0, Math.PI * 2);
+                var coinPos = polarToXY(cx, cy, coinR, coinAng);
+                coin.x = coinPos.x;
+                coin.y = coinPos.y;
+                coin.active = true;
+            } else if (level === 2) {
+                // Two black holes, smaller
+                var offset = 150;
+                blackHoles.push(new BlackHole(cx - offset, cy, 3e4));
+                blackHoles.push(new BlackHole(cx + offset, cy, 3e4));
 
-// --- Wall Collision Function ---
-function handleWallCollision(ball, wall) {
-    // AABB (Axis-Aligned Bounding Box) collision detection with circle (ball)
-    
-    // Find the closest point on the wall's AABB to the ball's center
-    var closestX = Math.max(wall.x, Math.min(ball.x, wall.x + wall.width));
-    var closestY = Math.max(wall.y, Math.min(ball.y, wall.y + wall.height));
+                // --- ADD WALLS FOR LEVEL 2 ---
+                // Wall 1: Horizontal barrier (a "wall")
+                walls.push(new Wall(cx - 200, cy - 50, 400, 20, '#5D6D7E'));
+                // Wall 2: Small square (a 2D wall)
+                walls.push(new Wall(cx, cy + 150, 50, 50, '#E74C3C'));
+                // -----------------------------
 
-    var dx = ball.x - closestX;
-    var dy = ball.y - closestY;
+                // Place coin near the edge
+                var coinR = Math.min(canvas.width, canvas.height) * 0.4;
+                var coinAng = randRange(0, Math.PI * 2);
+                var coinPos = polarToXY(cx, cy, coinR, coinAng);
+                coin.x = coinPos.x;
+                coin.y = coinPos.y;
+                coin.active = true;
+            } else if (level === 3) {
+                // Level 3: Three smaller black holes in a triangle formation
+                var triangleOffset = 180;
+                var bhMass = 2.5e4; // Slightly smaller mass
 
-    var distanceSq = dx*dx + dy*dy;
-    var radiusSq = ball.radius * ball.radius;
+                blackHoles.push(new BlackHole(cx, cy - triangleOffset, bhMass));
+                blackHoles.push(new BlackHole(cx - triangleOffset * 0.866, cy + triangleOffset * 0.5, bhMass)); // Math.sqrt(3)/2 ~ 0.866
+                blackHoles.push(new BlackHole(cx + triangleOffset * 0.866, cy + triangleOffset * 0.5, bhMass));
 
-    if (distanceSq < radiusSq) {
-        // Collision detected! Resolve it.
-        var distance = Math.sqrt(distanceSq);
-        var overlap = ball.radius - distance;
-        
-        // Normalize the collision vector
-        var nx = dx / (distance || 1e-6); 
-        var ny = dy / (distance || 1e-6);
+                // Walls: Create a small central box for balls to get trapped
+                var boxSize = 100;
+                walls.push(new Wall(cx - boxSize/2, cy - boxSize/2, boxSize, 10, '#2ECC71')); // Top
+                walls.push(new Wall(cx - boxSize/2, cy + boxSize/2, boxSize, 10, '#2ECC71')); // Bottom
+                walls.push(new Wall(cx - boxSize/2, cy - boxSize/2, 10, boxSize, '#2ECC71')); // Left
+                walls.push(new Wall(cx + boxSize/2, cy - boxSize/2, 10, boxSize + 10, '#2ECC71')); // Right
 
-        // 1. Position correction (push the ball out)
-        ball.x += nx * overlap;
-        ball.y += ny * overlap;
+                // Coin: Place the coin near one of the BHs, making the path risky
+                coin.x = blackHoles[0].x;
+                coin.y = blackHoles[0].y + 50;
+                coin.active = true;
+            } else if (level === 4) {
+                // Level 4: One large central BH with a wall gauntlet
+                var centralMass = 5.5e4; // Larger central mass
+                blackHoles.push(new BlackHole(cx, cy, centralMass));
 
-        // 2. Velocity reflection (bounce)
-        var velocityProjection = ball.vx * nx + ball.vy * ny;
+                // Walls: Two long, horizontal barriers to create a narrow, winding path
+                var wallLength = 500;
+                var wallGap = 80;
+                // Top Wall
+                walls.push(new Wall(cx - wallLength/2, cy - wallGap/2 - 7.5, wallLength, 15, '#F39C12'));
+                // Bottom Wall
+                walls.push(new Wall(cx - wallLength/2, cy + wallGap/2 - 7.5, wallLength, 15, '#F39C12'));
 
-        // Only reflect if the ball is moving towards the wall
-        if (velocityProjection < 0) {
-            var restitution = 0.8; // How bouncy the ball is (0.0 to 1.0)
-            
-            // Reflected velocity component: V_r = V - 2 * (V . N) * N
-            ball.vx = ball.vx - (1 + restitution) * velocityProjection * nx;
-            ball.vy = ball.vy - (1 + restitution) * velocityProjection * ny;
-        }
-    }
-}
+                // Coin: Place the coin at the end of the central wall corridor
+                coin.x = cx + wallLength/2 + 50;
+                coin.y = cy;
+                coin.active = true;
+            } else {
+                // Default / Victory screen
+                alert('You beat all levels! The game is over.');
+                blackHoles.push(new BlackHole(cx, cy));
+                stats.level = 'Finished';
+                coin.active = false;
+            }
+
+            initBalls();
+        }
+
+        function initBalls() {
+            balls.length = 0;
+            var cx = canvas.width/2, cy = canvas.height/2;
+            var bh = blackHoles[0] || { G: 28.0, mass: 4.5e4, softening: 120 }; // Use first BH or defaults
+
+            for (var i = 0; i < BALL_COUNT; i++) {
+                var r = randRange(140, Math.min(canvas.width, canvas.height) * 0.35);
+                var ang = randRange(0, Math.PI * 2);
+                var pos = polarToXY(cx, cy, r, ang);
+
+                var vCirc = Math.sqrt((bh.G * bh.mass) / (r + bh.softening));
+                var tx = -Math.sin(ang);
+                var ty =  Math.cos(ang);
+
+                var jitter = (i === PLAYER_BALL_INDEX) ? 0.0 : 0.25 * vCirc; // Lytze starts with less jitter
+                var vx = tx * vCirc + randRange(-jitter, jitter);
+                var vy = ty * vCirc + randRange(-jitter, jitter);
+
+                balls.push({
+                    x: pos.x, y: pos.y, vx: vx, vy: vy,
+                    color: pickColor(i),
+                    radius: (i === PLAYER_BALL_INDEX) ? 30 : 6 + (i % 3),
+                    life: 0,
+                    isLytze: (i === PLAYER_BALL_INDEX)
+                });
+            }
+        }
+
+        function pickColor(i) {
+            var palette = [
+                '#F0F0F0', // Lytze's colour
+                '#5DADE2', '#F5B041', '#AF7AC5',
+                '#E74C3C', '#1ABC9C', '#F4D03F', '#3498DB',
+                '#F39C12', '#9B59B6', '#2ECC71', '#EC7063'
+            ];
+            return palette[i % palette.length];
+        }
+
+        var last = performance.now();
+        function step(now) {
+            var dt = Math.min(0.035, (now - last) / 1000);
+            last = now;
+
+            fadeTrail(0.12);
+
+            // Black hole mutual gravity (BH loop kept as is)
+            for (var i = 0; i < blackHoles.length; i++) {
+                var BH1 = blackHoles[i];
+                var ax = 0, ay = 0;
+                for (var j = 0; j < blackHoles.length; j++) {
+                    if (i === j) continue;
+                    var BH2 = blackHoles[j];
+                    var rx = BH2.x - BH1.x;
+                    var ry = BH2.y - BH1.y;
+                    var r2 = rx*rx + ry*ry;
+                    var r = Math.sqrt(r2);
+                    if (r < BH1.horizon + BH2.horizon) {
+                        // Merge
+                        mergeBlackHoles(i, j);
+                        return requestAnimationFrame(step);
+                    }
+                    var ux = rx / (r+1e-6);
+                    var uy = ry / (r+1e-6);
+                    var grav = (BH1.G * BH2.mass) / (r2 + BH1.softening*BH1.softening);
+                    ax += ux * grav;
+                    ay += uy * grav;
+                }
+                BH1.vx += ax * dt;
+                BH1.vy += ay * dt;
+            }
+
+            // Update BH positions
+            for (var i = 0; i < blackHoles.length; i++) {
+                var BH = blackHoles[i];
+                BH.x += BH.vx * dt;
+                BH.y += BH.vy * dt;
+                drawBlackHole(BH);
+            }
+
+            // Draw walls before coin and balls
+            for (var i = 0; i < walls.length; i++) {
+                drawWall(walls[i]);
+            }
+
+            // Draw coin before balls so Lytze can cover it
+            if (coin.active) {
+                drawCoin(coin);
+                checkWinCondition(balls[PLAYER_BALL_INDEX]);
+            }
+
+            // Balls (Lytze included)
+            for (var j = 0; j < balls.length; j++) {
+                var b = balls[j];
+                var ax = 0, ay = 0;
+
+                // Gravity application
+                for (var k = 0; k < blackHoles.length; k++) {
+                    var BH = blackHoles[k];
+                    var rx = BH.x - b.x;
+                    var ry = BH.y - b.y;
+                    var r2 = rx*rx + ry*ry;
+                    var r = Math.sqrt(r2);
+                    var ux = r > 1e-6 ? rx/r : 0;
+                    var uy = r > 1e-6 ? ry/r : 0;
+                    var px = -uy, py = ux;
+                    var gravMag = (BH.G * BH.mass) / (r2 + BH.softening*BH.softening);
+                    ax += ux * gravMag;
+                    ay += uy * gravMag;
+                    var swirlMag = BH.swirlStrength * BH.omega / (r+1);
+                    ax += px * swirlMag;
+                    ay += py * swirlMag;
+                    if (r < BH.horizon) {
+                        // Collision with black hole
+                        if (b.isLytze) {
+                            // Lytze loses! Restart level.
+                            playLytzeAbsorbed(); // *** SOUND EFFECT ***
+                            alert('Lytze was absorbed! Restarting Level ' + stats.level);
+                            setupLevel(stats.level);
+                            return requestAnimationFrame(step);
+                        } else {
+                            stats.absorbed++;
+                            playBallAbsorbed(); // *** SOUND EFFECT ***
+                            respawn(b);
+                        }
+                    }
+                }
+
+                var damping = 0.02;
+                ax -= b.vx * damping;
+                ay -= b.vy * damping;
+                var a2 = ax*ax + ay*ay;
+                if (a2 > blackHoles[0].accCap*blackHoles[0].accCap) {
+                    var a = Math.sqrt(a2);
+                    var scale = blackHoles[0].accCap / a;
+                    ax *= scale; ay *= scale;
+                }
+                b.vx += ax*dt;
+                b.vy += ay*dt;
+                b.x += b.vx*dt;
+                b.y += b.vy*dt;
+
+                // --- WALL COLLISION DETECTION AND RESPONSE ---
+                for (var k = 0; k < walls.length; k++) {
+                    // handleWallCollision now returns true if a collision happened
+                    if (handleWallCollision(b, walls[k])) {
+                        playWallHit(); // *** SOUND EFFECT ***
+                    }
+                }
+                // ---------------------------------------------
+
+                b.life += dt;
+                drawBall(b);
+            }
+
+            drawHUD();
+            requestAnimationFrame(step);
+        }
+
+        function checkWinCondition(lytze) {
+            if (!lytze || !coin.active) return;
+
+            var dx = lytze.x - coin.x;
+            var dy = lytze.y - coin.y;
+            var distance = Math.sqrt(dx*dx + dy*dy);
+
+            if (distance < lytze.radius + COIN_RADIUS) {
+                // Lytze collected the coin! Win condition met.
+                playCoinCollect(); // *** SOUND EFFECT ***
+                stats.wins++;
+                coin.active = false;
+                alert('Level ' + stats.level + ' cleared! Time for Level ' + (stats.level + 1) + '!');
+                setupLevel(stats.level + 1);
+            }
+        }
+
+        // --- Wall Collision Function ---
+        function handleWallCollision(ball, wall) {
+            // Returns true if a collision occurred and was resolved
+            var closestX = Math.max(wall.x, Math.min(ball.x, wall.x + wall.width));
+            var closestY = Math.max(wall.y, Math.min(ball.y, wall.y + wall.height));
+
+            var dx = ball.x - closestX;
+            var dy = ball.y - closestY;
+
+            var distanceSq = dx*dx + dy*dy;
+            var radiusSq = ball.radius * ball.radius;
+
+            if (distanceSq < radiusSq) {
+                // Collision detected! Resolve it.
+                var distance = Math.sqrt(distanceSq);
+                var overlap = ball.radius - distance;
+
+                // Normalize the collision vector
+                var nx = dx / (distance || 1e-6);
+                var ny = dy / (distance || 1e-6);
+
+                // 1. Position correction (push the ball out)
+                ball.x += nx * overlap;
+                ball.y += ny * overlap;
+
+                // 2. Velocity reflection (bounce)
+                var velocityProjection = ball.vx * nx + ball.vy * ny;
+
+                // Only reflect if the ball is moving towards the wall
+                if (velocityProjection < 0) {
+                    var restitution = 0.8; // How bouncy the ball is (0.0 to 1.0)
+
+                    // Reflected velocity component: V_r = V - 2 * (V . N) * N
+                    ball.vx = ball.vx - (1 + restitution) * velocityProjection * nx;
+                    ball.vy = ball.vy - (1 + restitution) * velocityProjection * ny;
+                    return true; // Collision occurred
+                }
+            }
+            return false; // No collision or only a static contact
+        }
+
+        // --- Drawing Functions ---
+
+        // New function to draw a wall
+        function drawWall(wall) {
+            ctx.save();
+            ctx.fillStyle = wall.color;
+            ctx.fillRect(wall.x, wall.y, wall.width, wall.height);
+            // Add a border for visibility
+            ctx.strokeStyle = '#FFFFFF';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(wall.x, wall.y, wall.width, wall.height);
+            ctx.restore();
+        }
+
+        function drawCoin(c) {
+            var size = COIN_RADIUS;
+            // Draw a simple yellow coin
+            ctx.save();
+            ctx.fillStyle = '#FFD700'; // Gold color
+            ctx.strokeStyle = '#DAA520';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, size, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+
+            // Draw a star/sparkle for effect
+            ctx.fillStyle = 'rgba(255,255,255,0.7)';
+            ctx.fillRect(c.x - 1, c.y - size + 2, 2, 2);
+            ctx.fillRect(c.x + size - 4, c.y + size - 4, 2, 2);
+            ctx.restore();
+        }
+
+        function drawBall(b) {
+            ctx.save();
+            var speed = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+            var glowAlpha = Math.min(0.4, 0.1 + speed*0.003);
+            var trailLen = Math.min(30, 6 + speed*0.25);
+            var dx = b.vx, dy = b.vy;
+            var vmag = Math.sqrt(dx*dx + dy*dy) || 1;
+            var tx = dx/vmag, ty = dy/vmag;
+
+            // Trail for all particles
+            ctx.strokeStyle = hexWithAlpha(b.color, glowAlpha);
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(b.x, b.y);
+            ctx.lineTo(b.x - tx*trailLen, b.y - ty*trailLen);
+            ctx.stroke();
+
+            if (b.isLytze && lytzeImage.complete) {
+                // Draw Lytze as an image
+                var size = b.radius * 2;
+                ctx.drawImage(lytzeImage, b.x - b.radius, b.y - b.radius, size, size);
+            } else {
+                // Draw other balls or Lytze as a circle if image isn't loaded
+                ctx.fillStyle = b.color;
+                ctx.beginPath();
+                ctx.arc(b.x, b.y, b.radius, 0, Math.PI*2);
+                ctx.fill();
+            }
+            ctx.restore();
+        }
 
 
-// --- Drawing Functions ---
+        function mergeBlackHoles(i, j) {
+            playBlackHoleMerge(); // *** SOUND EFFECT ***
 
-// New function to draw a wall
-function drawWall(wall) {
-    ctx.save();
-    ctx.fillStyle = wall.color;
-    ctx.fillRect(wall.x, wall.y, wall.width, wall.height);
-    // Add a border for visibility
-    ctx.strokeStyle = '#FFFFFF';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(wall.x, wall.y, wall.width, wall.height);
-    ctx.restore();
-}
+            var BH1 = blackHoles[i];
+            var BH2 = blackHoles[j];
+            var totalMass = BH1.mass + BH2.mass;
+            var newX = (BH1.x*BH1.mass + BH2.x*BH2.mass)/totalMass;
+            var newY = (BH1.y*BH1.mass + BH2.y*BH2.mass)/totalMass;
+            var newVX = (BH1.vx*BH1.mass + BH2.vx*BH2.mass)/totalMass;
+            var newVY = (BH1.vy*BH1.mass + BH2.vy*BH2.mass)/totalMass;
+            var newBH = new BlackHole(newX, newY, totalMass);
+            newBH.vx = newVX;
+            newBH.vy = newVY;
+            newBH.horizon = Math.sqrt(BH1.horizon*BH1.horizon + BH2.horizon*BH2.horizon);
+            newBH.energyBurst = 1.0;
+            blackHoles.splice(Math.max(i,j),1);
+            blackHoles.splice(Math.min(i,j),1);
+            blackHoles.push(newBH);
+            stats.mergers++;
+        }
 
-function drawCoin(c) {
-  var size = COIN_RADIUS;
-  // Draw a simple yellow coin
-  ctx.save();
-  ctx.fillStyle = '#FFD700'; // Gold color
-  ctx.strokeStyle = '#DAA520';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(c.x, c.y, size, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-    // Draw a star/sparkle for effect
-  ctx.fillStyle = 'rgba(255,255,255,0.7)';
-  ctx.fillRect(c.x - 1, c.y - size + 2, 2, 2);
-  ctx.fillRect(c.x + size - 4, c.y + size - 4, 2, 2);
-  ctx.restore();
-}
+        function respawn(b) {
+            var cx = canvas.width/2, cy = canvas.height/2;
+            var bh = blackHoles[0] || { G: 28.0, mass: 4.5e4, softening: 120 };
+            var base = Math.min(canvas.width, canvas.height) * 0.4;
+            var r = randRange(base*0.55, base*0.95);
+            var ang = randRange(0, Math.PI*2);
+            var pos = polarToXY(cx, cy, r, ang);
+            var vCirc = Math.sqrt((bh.G * bh.mass) / (r + bh.softening));
+            var tx = -Math.sin(ang), ty = Math.cos(ang);
+            b.x = pos.x; b.y = pos.y;
+            b.vx = tx*vCirc; b.vy = ty*vCirc;
+            b.life = 0;
+        }
 
-function drawBall(b) {
-  ctx.save();
-  var speed = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
-  var glowAlpha = Math.min(0.4, 0.1 + speed*0.003);
-  var trailLen = Math.min(30, 6 + speed*0.25);
-  var dx = b.vx, dy = b.vy;
-  var vmag = Math.sqrt(dx*dx + dy*dy) || 1;
-  var tx = dx/vmag, ty = dy/vmag;
+        function fadeTrail(alpha) {
+            ctx.fillStyle = 'rgba(0,0,8,'+alpha+')';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
 
-  // Trail for all particles
-  ctx.strokeStyle = hexWithAlpha(b.color, glowAlpha);
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(b.x, b.y);
-  ctx.lineTo(b.x - tx*trailLen, b.y - ty*trailLen);
-  ctx.stroke();
+        function drawBlackHole(BH) {
+            // ... (kept as is)
+            var cx = BH.x, cy = BH.y;
 
-  if (b.isLytze && lytzeImage.complete) {
-    // Draw Lytze as an image
-    var size = b.radius * 2;
-    ctx.drawImage(lytzeImage, b.x - b.radius, b.y - b.radius, size, size);
-  } else {
-    // Draw other balls or Lytze as a circle if image isn't loaded
-    ctx.fillStyle = b.color;
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, b.radius, 0, Math.PI*2);
-    ctx.fill();
-  }
-  ctx.restore();
-}
+            // Energy burst effect on merger
+            if (BH.energyBurst > 0) {
+                var burstRadius = BH.horizon * (4 + 20 * BH.energyBurst);
+                var burstGrad = ctx.createRadialGradient(cx, cy, BH.horizon, cx, cy, burstRadius);
+                burstGrad.addColorStop(0, 'rgba(255,255,200,'+BH.energyBurst+')');
+                burstGrad.addColorStop(1, 'rgba(255,255,200,0)');
+                ctx.fillStyle = burstGrad;
+                ctx.beginPath();
+                ctx.arc(cx, cy, burstRadius, 0, Math.PI*2);
+                ctx.fill();
+                BH.energyBurst *= 0.92; // fade burst
+            }
 
+            // Accretion glow
+            var glow = ctx.createRadialGradient(cx, cy, BH.horizon*0.7, cx, cy, BH.horizon*4.0);
+            glow.addColorStop(0, 'rgba(255,200,100,0.18)');
+            glow.addColorStop(0.35, 'rgba(255,140,60,0.12)');
+            glow.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = glow;
+            ctx.beginPath();
+            ctx.arc(cx, cy, BH.horizon*4.0, 0, Math.PI*2);
+            ctx.fill();
 
+            // Event horizon
+            var horizonGrad = ctx.createRadialGradient(cx, cy, BH.horizon*0.2, cx, cy, BH.horizon);
+            horizonGrad.addColorStop(0, 'rgba(0,0,0,1)');
+            horizonGrad.addColorStop(1, 'rgba(10,10,20,1)');
+            ctx.fillStyle = horizonGrad;
+            ctx.beginPath();
+            ctx.arc(cx, cy, BH.horizon, 0, Math.PI*2);
+            ctx.fill();
+        }
 
-function mergeBlackHoles(i, j) {
-  // ... (kept as is, updates BHs and stats.mergers)
-  var BH1 = blackHoles[i];
-  var BH2 = blackHoles[j];
-  var totalMass = BH1.mass + BH2.mass;
-  var newX = (BH1.x*BH1.mass + BH2.x*BH2.mass)/totalMass;
-  var newY = (BH1.y*BH1.mass + BH2.y*BH2.mass)/totalMass;
-  var newVX = (BH1.vx*BH1.mass + BH2.vx*BH2.mass)/totalMass;
-  var newVY = (BH1.vy*BH1.mass + BH2.vy*BH2.mass)/totalMass;
-  var newBH = new BlackHole(newX, newY, totalMass);
-  newBH.vx = newVX;
-  newBH.vy = newVY;
-  newBH.horizon = Math.sqrt(BH1.horizon*BH1.horizon + BH2.horizon*BH2.horizon);
-  newBH.energyBurst = 1.0;
-  blackHoles.splice(Math.max(i,j),1);
-  blackHoles.splice(Math.min(i,j),1);
-  blackHoles.push(newBH);
-  stats.mergers++;
-}
+        function hexWithAlpha(hex, alpha) {
+            var r = parseInt(hex.substring(1,3),16);
+            var g = parseInt(hex.substring(3,5),16);
+            var b = parseInt(hex.substring(5,7),16);
+            return 'rgba('+r+','+g+','+b+','+alpha+')';
+        }
 
-function respawn(b) {
-  var cx = canvas.width/2, cy = canvas.height/2;
-  var bh = blackHoles[0] || { G: 28.0, mass: 4.5e4, softening: 120 };
-  var base = Math.min(canvas.width, canvas.height) * 0.4;
-  var r = randRange(base*0.55, base*0.95);
-  var ang = randRange(0, Math.PI*2);
-  var pos = polarToXY(cx, cy, r, ang);
-  var vCirc = Math.sqrt((bh.G * bh.mass) / (r + bh.softening));
-  var tx = -Math.sin(ang), ty = Math.cos(ang);
-  b.x = pos.x; b.y = pos.y;
-  b.vx = tx*vCirc; b.vy = ty*vCirc;
-  b.life = 0;
-}
+        function drawHUD() {
+            ctx.save();
+            ctx.font = '14px monospace';
+            ctx.fillStyle = 'rgba(255,255,255,0.85)';
 
-function fadeTrail(alpha) {
-  ctx.fillStyle = 'rgba(0,0,8,'+alpha+')';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-}
+            //THE TEXT!
+            var lines = [
+                'LEVEL: ' + stats.level,
+                'Black holes: ' + blackHoles.length,
+                'Lytze size: ' + balls[PLAYER_BALL_INDEX].radius,
+                'Absorbed: ' + stats.absorbed,
+                'Mergers: ' + stats.mergers,
+                'Lytze the Fuzbal Prototype ',
+                'By viewing this prototype, you agree to our terms of service. Stenoip Company '
+            ];
+            var y = 24;
+            for (var i = 0; i < lines.length; i++) {
+                ctx.fillText(lines[i], 18, y);
+                y += 18;
+            }
+            ctx.restore();
+        }
 
-function drawBlackHole(BH) {
-  // ... (kept as is)
-  var cx = BH.x, cy = BH.y;
+        // Add new black hole on click/tap
+        canvas.addEventListener('click', function(e) {
+            // Initialize audio context on the first user interaction
+            if (!audioCtx) {
+                initAudio();
+            }
 
-  // Energy burst effect on merger
-  if (BH.energyBurst > 0) {
-    var burstRadius = BH.horizon * (4 + 20 * BH.energyBurst);
-    var burstGrad = ctx.createRadialGradient(cx, cy, BH.horizon, cx, cy, burstRadius);
-    burstGrad.addColorStop(0, 'rgba(255,255,200,'+BH.energyBurst+')');
-    burstGrad.addColorStop(1, 'rgba(255,255,200,0)');
-    ctx.fillStyle = burstGrad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, burstRadius, 0, Math.PI*2);
-    ctx.fill();
-    BH.energyBurst *= 0.92; // fade burst
-  }
+            var rect = canvas.getBoundingClientRect();
+            var x = e.clientX - rect.left;
+            var y = e.clientY - rect.top;
+            blackHoles.push(new BlackHole(x, y));
+        });
 
-  // Accretion glow
-  var glow = ctx.createRadialGradient(cx, cy, BH.horizon*0.7, cx, cy, BH.horizon*4.0);
-  glow.addColorStop(0, 'rgba(255,200,100,0.18)');
-  glow.addColorStop(0.35, 'rgba(255,140,60,0.12)');
-  glow.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = glow;
-  ctx.beginPath();
-  ctx.arc(cx, cy, BH.horizon*4.0, 0, Math.PI*2);
-  ctx.fill();
-
-  // Event horizon
-  var horizonGrad = ctx.createRadialGradient(cx, cy, BH.horizon*0.2, cx, cy, BH.horizon);
-  horizonGrad.addColorStop(0, 'rgba(0,0,0,1)');
-  horizonGrad.addColorStop(1, 'rgba(10,10,20,1)');
-  ctx.fillStyle = horizonGrad;
-  ctx.beginPath();
-  ctx.arc(cx, cy, BH.horizon, 0, Math.PI*2);
-  ctx.fill();
-}
-
-function hexWithAlpha(hex, alpha) {
-   var r = parseInt(hex.substring(1,3),16);
-  var g = parseInt(hex.substring(3,5),16);
-  var b = parseInt(hex.substring(5,7),16);
-  return 'rgba('+r+','+g+','+b+','+alpha+')';
-}
-
-function drawHUD() {
-  ctx.save();
-  ctx.font = '14px monospace';
-  ctx.fillStyle = 'rgba(255,255,255,0.85)';
-     //THE TEXT!
-  var lines = [
-    'LEVEL: ' + stats.level,
-    'Black holes: ' + blackHoles.length,
-    'Lytze size: ' + balls[PLAYER_BALL_INDEX].radius,
-    'Absorbed: ' + stats.absorbed,
-    'Mergers: ' + stats.mergers,
-    'Lytze the Fuzbal Prototype ',
-    'By viewing this prototype, you agree to our terms of service. Stenoip Company '
-  ];
-  var y = 24;
-  for (var i = 0; i < lines.length; i++) {
-    ctx.fillText(lines[i], 18, y);
-    y += 18;
-  }
-  ctx.restore();
-}
-
-// Add new black hole on click/tap
-canvas.addEventListener('click', function(e) {
-  var rect = canvas.getBoundingClientRect();
-  var x = e.clientX - rect.left;
-  var y = e.clientY - rect.top;
-  blackHoles.push(new BlackHole(x, y));
-});
-
-// Initialize and run
-setupLevel(1); // Start the game at level 1
-ctx.fillStyle = 'rgb(0,0,8)';
-ctx.fillRect(0, 0, canvas.width, canvas.height);
-requestAnimationFrame(step);
-</script>
+        // Initialize and run
+        setupLevel(1); // Start the game at level 1
+        ctx.fillStyle = 'rgb(0,0,8)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        requestAnimationFrame(step);
+    </script>
 </body>
 </html>
