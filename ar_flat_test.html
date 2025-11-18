@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AR Testing Surface Detection</title>
+<style>
+  html, body { margin:0; height:100%; background:#111; color:#fff; font-family:sans-serif; }
+  #ui { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); }
+  button { padding:12px 16px; border:none; border-radius:8px; background:#28a745; color:#fff; font-size:16px; }
+  canvas { width:100%; height:100%; display:block; }
+</style>
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+<div id="ui"><button id="start">Start AR</button></div>
+
+<script>
+var xrSession = null;
+var gl = null;
+var xrRefSpace = null;
+var viewerRefSpace = null;
+var hitTestSource = null;
+var reticlePose = null;
+var cubePlaced = false;
+var canvas = document.getElementById('glcanvas');
+var startBtn = document.getElementById('start');
+
+/* Shader helpers */
+function createShader(gl, type, src) {
+  var s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  return s;
+}
+function createProgram(gl, vsSrc, fsSrc) {
+  var vs = createShader(gl, gl.VERTEX_SHADER, vsSrc);
+  var fs = createShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+  var p = gl.createProgram();
+  gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
+  return p;
+}
+
+/* Cube geometry */
+var cubeVerts = new Float32Array([
+  -0.1,-0.1, 0.1, 1,0,0,   0.1,-0.1, 0.1, 0,1,0,   0.1, 0.1, 0.1, 0,0,1,  -0.1, 0.1, 0.1, 1,1,0,
+  -0.1,-0.1,-0.1, 1,0,1,   0.1,-0.1,-0.1, 0,1,1,   0.1, 0.1,-0.1, 1,1,1,  -0.1, 0.1,-0.1, 0.5,0.5,0.5
+]);
+var cubeIdx = new Uint16Array([
+  0,1,2, 0,2,3, 4,6,5, 4,7,6, 0,3,7, 0,7,4, 1,5,6, 1,6,2, 3,2,6, 3,6,7, 0,4,5, 0,5,1
+]);
+
+var progCube, aPosLoc, aColLoc, uProjLoc, uViewLoc, uModelLoc;
+var cubeVBO, cubeCBO, cubeIBO;
+
+/* Reticle geometry (circle) */
+function makeReticlePoints(segments, radius) {
+  var arr = [];
+  for (var i=0;i<=segments;i++) {
+    var a = (i/segments)*Math.PI*2;
+    arr.push(Math.cos(a)*radius, 0, Math.sin(a)*radius);
+  }
+  return new Float32Array(arr);
+}
+var reticleVerts = makeReticlePoints(48, 0.08);
+var progRet, rPosLoc, rProjLoc, rViewLoc, rModelLoc, retVBO;
+
+/* Shaders */
+var vsCube = `
+attribute vec3 aPos;
+attribute vec3 aCol;
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform mat4 uModel;
+varying vec3 vCol;
+void main(){
+  gl_Position = uProj * uView * uModel * vec4(aPos,1.0);
+  vCol = aCol;
+}`;
+var fsCube = `precision mediump float; varying vec3 vCol; void main(){ gl_FragColor = vec4(vCol,1.0); }`;
+
+var vsRet = `
+attribute vec3 aPos;
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform mat4 uModel;
+void main(){ gl_Position = uProj * uView * uModel * vec4(aPos,1.0); }`;
+var fsRet = `precision mediump float; void main(){ gl_FragColor = vec4(0.0,1.0,0.5,1.0); }`;
+
+function setupWebGL() {
+  gl = canvas.getContext('webgl', { xrCompatible:true });
+  xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
+
+  progCube = createProgram(gl, vsCube, fsCube);
+  aPosLoc = gl.getAttribLocation(progCube, 'aPos');
+  aColLoc = gl.getAttribLocation(progCube, 'aCol');
+  uProjLoc = gl.getUniformLocation(progCube, 'uProj');
+  uViewLoc = gl.getUniformLocation(progCube, 'uView');
+  uModelLoc = gl.getUniformLocation(progCube, 'uModel');
+
+  progRet = createProgram(gl, vsRet, fsRet);
+  rPosLoc = gl.getAttribLocation(progRet, 'aPos');
+  rProjLoc = gl.getUniformLocation(progRet, 'uProj');
+  rViewLoc = gl.getUniformLocation(progRet, 'uView');
+  rModelLoc = gl.getUniformLocation(progRet, 'uModel');
+
+  cubeVBO = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, cubeVBO);
+  gl.bufferData(gl.ARRAY_BUFFER, cubeVerts, gl.STATIC_DRAW);
+
+  var cols = new Float32Array(8*3);
+  for (var i=0;i<8;i++){ cols[i*3]=cubeVerts[i*6+3]; cols[i*3+1]=cubeVerts[i*6+4]; cols[i*3+2]=cubeVerts[i*6+5]; }
+  cubeCBO = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, cubeCBO);
+  gl.bufferData(gl.ARRAY_BUFFER, cols, gl.STATIC_DRAW);
+
+  cubeIBO = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIBO);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, cubeIdx, gl.STATIC_DRAW);
+
+  retVBO = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, retVBO);
+  gl.bufferData(gl.ARRAY_BUFFER, reticleVerts, gl.STATIC_DRAW);
+}
+
+startBtn.onclick = function(){
+  navigator.xr.requestSession('immersive-ar', { requiredFeatures:['hit-test','local-floor'] }).then(function(session){
+    xrSession = session;
+    setupWebGL();
+    xrSession.requestReferenceSpace('local-floor').then(function(ref){
+      xrRefSpace = ref;
+      xrSession.requestReferenceSpace('viewer').then(function(vref){
+        viewerRefSpace = vref;
+        xrSession.requestHitTestSource({ space: viewerRefSpace }).then(function(source){
+          hitTestSource = source;
+          xrSession.requestAnimationFrame(onXRFrame);
+        });
+      });
+    });
+  });
+};
+
+function onXRFrame(time, frame) {
+  xrSession.requestAnimationFrame(onXRFrame);
+  var baseLayer = xrSession.renderState.baseLayer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer);
+
+  var pose = frame.getViewerPose(xrRefSpace);
+  if (!pose) return;
+
+  gl.clearColor(0,0,0,0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+
+  // Hit test for reticle
+  reticlePose = null;
+  if (hitTestSource) {
+    var hits = frame.getHitTestResults(hitTestSource);
+    if (hits.length > 0) {
+      reticlePose = hits[0].getPose(xrRefSpace);
+      cubePlaced = true; // once we have a surface, place cube
+    }
+  }
+
+  for (var i=0;i<pose.views.length;i++) {
+    var view = pose.views[i];
+    var vp = baseLayer.getViewport(view);
+    gl.viewport(vp.x, vp.y, vp.width, vp.height);
+
+    var proj = view.projectionMatrix;
+    var viewMat = view.transform.inverse.matrix;
+
+    // Draw reticle
+    if (reticlePose) {
+      gl.useProgram(progRet);
+      gl.uniformMatrix4fv(rProjLoc, false, proj);
+      gl.uniformMatrix4fv(rViewLoc, false, viewMat);
+      var model = mat4Identity();
+      model[12] = reticlePose.transform.position.x;
+      model[13] = reticlePose.transform.position.y;
+      model[14] = reticlePose.transform.position.z;
+      gl.uniformMatrix4fv(rModelLoc, false, model);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, retVBO);
+      gl.enableVertexAttribArray(rPosLoc);
+      gl.vertexAttribPointer(rPosLoc, 3, gl.FLOAT, false, 0, 0);
+      gl.drawArrays(gl.LINE_STRIP, 0, reticleVerts.length/3);
+    }
+
+    // Draw cube if a surface was found
+    if (cubePlaced && reticlePose) {
+      gl.useProgram(progCube);
+      gl.uniformMatrix4fv(uProjLoc, false, proj);
+      gl.uniformMatrix4fv(uViewLoc, false, viewMat);
+
+      var modelCube = mat4Identity();
+      modelCube[12] = reticlePose.transform.position.x;
+      modelCube[13] = reticlePose.transform.position.y;
+      modelCube[14] = reticlePose.transform.position.z;
+      gl.uniformMatrix4fv(uModelLoc, false, modelCube);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, cubeVBO);
+      gl.enableVertexAttribArray(aPosLoc);
+      gl.vertexAttribPointer(aPosLoc, 3, gl.FLOAT, false, 24, 0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, cubeCBO);
+      gl.enableVertexAttribArray(aColLoc);
+      gl.vertexAttribPointer(aColLoc, 3, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIBO);
+      gl.drawElements(gl.TRIANGLES, cubeIdx.length, gl.UNSIGNED_SHORT, 0);
+    }
+  }
+}
+
+function mat4Identity(){
+  return new Float32Array([
+    1,0,0,0,
+    0,1,0,0,
+    0,0,1,0,
+    0,0,0,1
+  ]);
+}
+</script>
+</body>
+</html>
