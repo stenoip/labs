@@ -1,232 +1,148 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>WebXR AR Demo</title>
-  <style>
-    html, body {
-      margin: 0;
-      height: 100%;
-      background: #0f1115;
-      color: #e6e6e6;
-      font-family: system-ui, sans-serif;
-    }
-    #overlay {
-      position: fixed;
-      inset: 0;
-      display: grid;
-      place-items: center;
-      text-align: center;
-      padding: 24px;
-      color: #cfd7ff;
-      background: rgba(0,0,0,0.6);
-    }
-    #overlay.hidden { display: none; }
-    button {
-      border: 0;
-      border-radius: 10px;
-      padding: 10px 14px;
-      font-weight: 600;
-      cursor: pointer;
-      background: #8ef1a9;
-      color: #0f1115;
-    }
-    #ui {
-      position: fixed;
-      left: 0; right: 0; bottom: 0;
-      padding: 12px 16px;
-      display: flex;
-      gap: 10px;
-      justify-content: center;
-      background: linear-gradient(to top, rgba(0,0,0,0.4), rgba(0,0,0,0));
-      pointer-events: none;
-    }
-    #ui button, #ui span { pointer-events: auto; }
-    #msg {
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.12);
-      padding: 8px 12px;
-      border-radius: 10px;
-      font-size: 14px;
-    }
-    .reticle {
-      position: fixed;
-      left: 50%; top: 50%;
-      width: 32px; height: 32px;
-      transform: translate(-50%, -50%);
-      border-radius: 50%;
-      border: 2px solid #8ef1a9;
-      box-shadow: 0 0 20px rgba(142,241,169,0.5);
-      opacity: 0;
-      transition: opacity 0.15s ease;
-      pointer-events: none;
-    }
-    .reticle.visible { opacity: 1; }
-    canvas { display: block; }
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AR testing by Stenoip Company</title>
+<style>
+  html, body { margin:0; height:100%; background:#111; color:#fff; font-family:sans-serif; }
+  #ui { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); }
+  button { padding:12px 16px; border:none; border-radius:8px; background:#28a745; color:#fff; font-size:16px; }
+  canvas { width:100%; height:100%; display:block; }
+</style>
 </head>
 <body>
-  <div id="overlay">
-    <div>
-      <h1>AR demo</h1>
-      <p>Place a glowing cube on detected surfaces.<br/>Works on mobile browsers with WebXR AR support.</p>
-      <button id="start">Start AR</button>
-      <p style="margin-top:12px;font-size:13px;opacity:0.8;">
-        Tip: Move your phone to let it find a surface. Tap to place the cube.
-      </p>
-    </div>
-  </div>
+<canvas id="glcanvas"></canvas>
+<div id="ui"><button id="start">Start AR</button></div>
 
-  <div id="ui">
-    <button id="place" disabled>Place here</button>
-    <span id="msg">Waiting for surface…</span>
-  </div>
+<script>
+var xrSession = null;
+var gl = null;
+var xrRefSpace = null;
+var canvas = document.getElementById('glcanvas');
+var startBtn = document.getElementById('start');
 
-  <div class="reticle" id="reticle"></div>
+/* Shader helpers */
+function createShader(gl, type, src) {
+  var s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  return s;
+}
+function createProgram(gl, vsSrc, fsSrc) {
+  var vs = createShader(gl, gl.VERTEX_SHADER, vsSrc);
+  var fs = createShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+  var p = gl.createProgram();
+  gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
+  return p;
+}
 
-  <!-- Use ES module build of Three.js -->
-  <script type="module">
-    import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+/* Cube geometry */
+var cubeVerts = new Float32Array([
+  -0.1,-0.1, 0.1, 1,0,0,   0.1,-0.1, 0.1, 0,1,0,   0.1, 0.1, 0.1, 0,0,1,  -0.1, 0.1, 0.1, 1,1,0,
+  -0.1,-0.1,-0.1, 1,0,1,   0.1,-0.1,-0.1, 0,1,1,   0.1, 0.1,-0.1, 1,1,1,  -0.1, 0.1,-0.1, 0.5,0.5,0.5
+]);
+var cubeIdx = new Uint16Array([
+  0,1,2, 0,2,3, 4,6,5, 4,7,6, 0,3,7, 0,7,4, 1,5,6, 1,6,2, 3,2,6, 3,6,7, 0,4,5, 0,5,1
+]);
 
-    var xrSession = null;
-    var xrRefSpace = null;
-    var hitTestSource = null;
+var progCube, aPosLoc, aColLoc, uProjLoc, uViewLoc, uModelLoc;
+var cubeVBO, cubeCBO, cubeIBO;
 
-    var renderer = null;
-    var scene = null;
-    var camera = null;
+/* Shaders */
+var vsSrc = `
+attribute vec3 aPos;
+attribute vec3 aCol;
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform mat4 uModel;
+varying vec3 vCol;
+void main(){
+  gl_Position = uProj * uView * uModel * vec4(aPos,1.0);
+  vCol = aCol;
+}`;
+var fsSrc = `
+precision mediump float;
+varying vec3 vCol;
+void main(){ gl_FragColor = vec4(vCol,1.0); }`;
 
-    var cube = null;
-    var cubePlaced = false;
-    var lastHitPose = null;
+function setupWebGL() {
+  gl = canvas.getContext('webgl', { xrCompatible:true });
+  xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
 
-    var overlay = document.getElementById('overlay');
-    var startBtn = document.getElementById('start');
-    var placeBtn = document.getElementById('place');
-    var msg = document.getElementById('msg');
-    var reticleEl = document.getElementById('reticle');
+  progCube = createProgram(gl, vsSrc, fsSrc);
+  aPosLoc = gl.getAttribLocation(progCube, 'aPos');
+  aColLoc = gl.getAttribLocation(progCube, 'aCol');
+  uProjLoc = gl.getUniformLocation(progCube, 'uProj');
+  uViewLoc = gl.getUniformLocation(progCube, 'uView');
+  uModelLoc = gl.getUniformLocation(progCube, 'uModel');
 
-    function initThree() {
-      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-      renderer.setPixelRatio(window.devicePixelRatio || 1);
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      renderer.xr.enabled = true;
-      document.body.appendChild(renderer.domElement);
+  cubeVBO = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, cubeVBO);
+  gl.bufferData(gl.ARRAY_BUFFER, cubeVerts, gl.STATIC_DRAW);
 
-      scene = new THREE.Scene();
-      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
+  var cols = new Float32Array(8*3);
+  for (var i=0;i<8;i++){ cols[i*3]=cubeVerts[i*6+3]; cols[i*3+1]=cubeVerts[i*6+4]; cols[i*3+2]=cubeVerts[i*6+5]; }
+  cubeCBO = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, cubeCBO);
+  gl.bufferData(gl.ARRAY_BUFFER, cols, gl.STATIC_DRAW);
 
-      var geo = new THREE.BoxGeometry(0.1, 0.1, 0.1);
-      var mat = new THREE.MeshStandardMaterial({
-        color: 0x8ef1a9,
-        emissive: 0x3bd47a,
-        roughness: 0.4,
-        metalness: 0.1
-      });
-      cube = new THREE.Mesh(geo, mat);
-      cube.visible = false;
-      scene.add(cube);
+  cubeIBO = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIBO);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, cubeIdx, gl.STATIC_DRAW);
+}
 
-      var hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0);
-      scene.add(hemi);
-
-      window.addEventListener('resize', function () {
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        camera.aspect = window.innerWidth / window.innerHeight;
-        camera.updateProjectionMatrix();
-      });
-    }
-
-    async function startAR() {
-      if (!navigator.xr) {
-        msg.textContent = 'WebXR not available.';
-        return;
-      }
-      var supported = await navigator.xr.isSessionSupported('immersive-ar');
-      if (!supported) {
-        msg.textContent = 'AR not supported.';
-        return;
-      }
-      xrSession = await navigator.xr.requestSession('immersive-ar', {
-        requiredFeatures: ['hit-test', 'dom-overlay'],
-        domOverlay: { root: document.body }
-      });
-
-      overlay.classList.add('hidden');
-      renderer.xr.setSession(xrSession);
-      xrRefSpace = await xrSession.requestReferenceSpace('local');
-
-      var viewerSpace = await xrSession.requestReferenceSpace('viewer');
-      hitTestSource = await xrSession.requestHitTestSource({ space: viewerSpace });
-
-      placeBtn.disabled = true;
-      placeBtn.addEventListener('click', function () {
-        if (lastHitPose) placeCubeAt(lastHitPose.transform.matrix);
-      });
-
-      xrSession.addEventListener('end', function () {
-        msg.textContent = 'AR session ended.';
-        reticleEl.classList.remove('visible');
-        placeBtn.disabled = true;
-        cubePlaced = false;
-        cube.visible = false;
-      });
-
-      renderer.setAnimationLoop(onXRFrame);
-    }
-
-    function onXRFrame(time, frame) {
-      if (!frame || !xrRefSpace) return;
-      var pose = frame.getViewerPose(xrRefSpace);
-      if (!pose) return;
-
-      var hits = hitTestSource ? frame.getHitTestResults(hitTestSource) : [];
-      if (hits.length > 0) {
-        var hitPose = hits[0].getPose(xrRefSpace);
-        lastHitPose = hitPose;
-        reticleEl.classList.add('visible');
-        placeBtn.disabled = false;
-        if (!cubePlaced) {
-          applyMatrixToObject(cube, hitPose.transform.matrix);
-          cube.visible = true;
-          cube.rotation.y += 0.02;
-        }
-        msg.textContent = 'Surface found. Tap Place.';
-      } else {
-        reticleEl.classList.remove('visible');
-        placeBtn.disabled = true;
-        msg.textContent = 'Scanning for surface…';
-        if (!cubePlaced) cube.visible = false;
-      }
-      renderer.render(scene, camera);
-    }
-
-    function placeCubeAt(matrix) {
-      applyMatrixToObject(cube, matrix);
-      cube.visible = true;
-      cubePlaced = true;
-      msg.textContent = 'Placed!';
-    }
-
-    function applyMatrixToObject(obj, matrixArray) {
-      var m = new THREE.Matrix4();
-      m.fromArray(matrixArray);
-      obj.matrixAutoUpdate = false;
-      obj.matrix.copy(m);
-      obj.matrixWorldNeedsUpdate = true;
-    }
-
-    startBtn.addEventListener('click', function () {
-      initThree();
-      startAR();
+startBtn.onclick = function(){
+  navigator.xr.requestSession('immersive-ar', { requiredFeatures:['local-floor'] }).then(function(session){
+    xrSession = session;
+    setupWebGL();
+    xrSession.requestReferenceSpace('local-floor').then(function(ref){
+      xrRefSpace = ref;
+      xrSession.requestAnimationFrame(onXRFrame);
     });
+  });
+};
 
-    document.body.addEventListener('click', function () {
-      if (xrSession && lastHitPose && !cubePlaced) {
-        placeCubeAt(lastHitPose.transform.matrix);
-      }
-    }, { passive: true });
-  </script>
+function onXRFrame(time, frame) {
+  xrSession.requestAnimationFrame(onXRFrame);
+  var baseLayer = xrSession.renderState.baseLayer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer);
+
+  var pose = frame.getViewerPose(xrRefSpace);
+  if (!pose) return;
+
+  gl.clearColor(0,0,0,0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+
+  for (var i=0;i<pose.views.length;i++) {
+    var view = pose.views[i];
+    var vp = baseLayer.getViewport(view);
+    gl.viewport(vp.x, vp.y, vp.width, vp.height);
+
+    gl.useProgram(progCube);
+    gl.uniformMatrix4fv(uProjLoc, false, view.projectionMatrix);
+    gl.uniformMatrix4fv(uViewLoc, false, view.transform.inverse.matrix);
+
+    // Model matrix: cube floating 0.5m in front of camera
+    var model = mat4Identity();
+    model[12] = 0; model[13] = 0; model[14] = -0.5;
+    gl.uniformMatrix4fv(uModelLoc, false, model);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, cubeVBO);
+    gl.enableVertexAttribArray(aPosLoc);
+    gl.vertexAttribPointer(aPosLoc, 3, gl.FLOAT, false, 24, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, cubeCBO);
+    gl.enableVertexAttribArray(aColLoc);
+    gl.vertexAttribPointer(aColLoc, 3, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIBO);
+    gl.drawElements(gl.TRIANGLES, cubeIdx.length, gl.UNSIGNED_SHORT, 0);
+  }
+}
+
+function mat4Identity(){ return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]); }
+</script>
 </body>
 </html>
